@@ -74,6 +74,26 @@ function formatContent(text: string, query: string): React.ReactNode {
 
 const LIMIT = 50;
 
+const TEMPLATE_QUESTIONS = [
+  'このDMの概要を教えて',
+  '2人の関係性は？',
+  'よく話している話題は？',
+  '写真や画像はどんなのが送られてる？',
+  '口調や性格の特徴は？',
+];
+
+const FOLLOW_UP_SUGGESTIONS = [
+  'もっと詳しく',
+  '具体的な例は？',
+  'いつ頃の話？',
+  '他には？',
+];
+
+type ChatMsg = {
+  role: 'user' | 'ai';
+  text: string;
+};
+
 export default function Home() {
   const [results, setResults] = useState<Message[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -89,6 +109,13 @@ export default function Home() {
   const queryRef = useRef('');
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  // AI Chat state
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   const search = useCallback((q: string, append = false) => {
     const offset = append ? offsetRef.current : 0;
@@ -186,6 +213,35 @@ export default function Home() {
     });
   };
 
+  // AI Chat handlers
+  const sendChat = async (text: string) => {
+    if (!text.trim() || chatLoading) return;
+    setChatMessages((prev) => [...prev, { role: 'user', text }]);
+    setChatInput('');
+    setChatLoading(true);
+    try {
+      const res = await fetch('/api/ai-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: text }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setChatMessages((prev) => [...prev, { role: 'ai', text: data.answer }]);
+    } catch (err: any) {
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'ai', text: `エラー: ${err.message}` },
+      ]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages, chatLoading]);
+
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100">
       <div className="mx-auto max-w-3xl px-4 py-8">
@@ -201,6 +257,114 @@ export default function Home() {
           />
         </div>
 
+        {/* AI Chat toggle */}
+        <div className="mb-4 flex items-center justify-between">
+          <p className="text-sm text-gray-500 dark:text-gray-400">
+            {totalCount.toLocaleString()} 件
+            {query && ' ヒット'}
+          </p>
+          <button
+            onClick={() => setChatOpen((v) => !v)}
+            className="rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow hover:bg-blue-700 transition"
+          >
+            {chatOpen ? 'チャットを閉じる' : 'AIにDMについて聞く'}
+          </button>
+        </div>
+
+        {/* AI Chat Panel */}
+        {chatOpen && (
+          <div className="mb-6 rounded-xl border border-gray-200 bg-white shadow-sm dark:border-gray-700 dark:bg-gray-800">
+            <div className="flex h-96 flex-col">
+              <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                {chatMessages.length === 0 && (
+                  <div className="space-y-2">
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
+                      DMについて質問してみましょう。下のボタンをポチポチするだけでもOKです。
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {TEMPLATE_QUESTIONS.map((q) => (
+                        <button
+                          key={q}
+                          onClick={() => sendChat(q)}
+                          disabled={chatLoading}
+                          className="rounded-full bg-gray-100 px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+                        >
+                          {q}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {chatMessages.map((m, i) => (
+                  <div
+                    key={i}
+                    className={`rounded-lg px-3 py-2 text-sm ${
+                      m.role === 'user'
+                        ? 'ml-auto max-w-[80%] bg-blue-600 text-white'
+                        : 'max-w-[90%] bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200'
+                    }`}
+                  >
+                    <p className="whitespace-pre-wrap leading-relaxed">{m.text}</p>
+                  </div>
+                ))}
+                {chatLoading && (
+                  <div className="max-w-[90%] rounded-lg bg-gray-100 px-3 py-2 text-sm text-gray-500 dark:bg-gray-700 dark:text-gray-400">
+                    考え中...
+                  </div>
+                )}
+                <div ref={chatEndRef} />
+              </div>
+
+              {/* Follow-up suggestions after AI response */}
+              {chatMessages.length > 0 &&
+                chatMessages[chatMessages.length - 1].role === 'ai' &&
+                !chatLoading && (
+                  <div className="border-t border-gray-100 px-4 py-2 dark:border-gray-700">
+                    <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+                      フォローアップ
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {FOLLOW_UP_SUGGESTIONS.map((q) => (
+                        <button
+                          key={q}
+                          onClick={() => sendChat(q)}
+                          className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-600 transition hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+                        >
+                          {q}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+              <div className="border-t border-gray-100 p-3 dark:border-gray-700">
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    sendChat(chatInput);
+                  }}
+                  className="flex gap-2"
+                >
+                  <input
+                    type="text"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    placeholder="自由に質問..."
+                    className="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm outline-none transition placeholder:text-gray-400 focus:border-blue-500 dark:border-gray-600 dark:bg-gray-900"
+                  />
+                  <button
+                    type="submit"
+                    disabled={chatLoading || !chatInput.trim()}
+                    className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    送信
+                  </button>
+                </form>
+              </div>
+            </div>
+          </div>
+        )}
+
         {loading && (
           <p className="text-gray-500 dark:text-gray-400">
             {query ? '検索中...' : '読み込み中...'}
@@ -211,11 +375,6 @@ export default function Home() {
 
         {!loading && !error && (
           <div className="space-y-4">
-            <p className="text-sm text-gray-500 dark:text-gray-400">
-              {totalCount.toLocaleString()} 件
-              {query && ' ヒット'}
-            </p>
-
             {results.length === 0 ? (
               <p className="text-gray-500 dark:text-gray-400">
                 {query
