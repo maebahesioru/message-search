@@ -3,10 +3,14 @@ import fs from "fs";
 import path from "path";
 import WebSocket from "ws";
 
-const SESSION_ID =
-  "1vPQa-lPs3NA4I2kaeo6Q0LhDBmPGjOa.veUPz8AFwc6JaWQ+SdezaCimfH4PG3+jEVNSnLO8xhI";
 const GRAPHQL_HTTP = "https://biz-graphql.tenbin.ai/graphql";
 const GRAPHQL_WS = "wss://biz-graphql.tenbin.ai/graphql";
+
+function getSessionId(): string {
+  const id = process.env.TENBIN_SESSION_ID;
+  if (!id) throw new Error("TENBIN_SESSION_ID is not set in environment");
+  return id;
+}
 
 let cachedMessages: Array<{
   ts: string;
@@ -38,10 +42,8 @@ function buildContext(question: string) {
   const messages = getMessages();
   const authors = [...new Set(messages.map((m) => m.author))];
 
-  // 最新200件を時系列で取得
   const recent = messages.slice(-200);
 
-  // キーワードマッチで関連メッセージも追加
   const q = question.toLowerCase();
   const keywords = q
     .replace(/[?？！!。、,.\s]/g, " ")
@@ -53,7 +55,6 @@ function buildContext(question: string) {
     return keywords.some((kw) => content.includes(kw));
   });
 
-  // 重複排除・時系列ソート
   const seen = new Set<string>();
   const contextMessages = [...recent, ...related]
     .filter((m) => {
@@ -78,30 +79,27 @@ function buildContext(question: string) {
   };
 }
 
-async function graphqlMutation<T = unknown>(
+async function graphqlRequest<T = unknown>(
   operationName: string,
   query: string,
   variables: Record<string, unknown>
 ): Promise<T> {
+  const sessionId = getSessionId();
   const res = await fetch(GRAPHQL_HTTP, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/graphql-response+json",
+      Cookie: `sessionId=${sessionId}`,
     },
     body: JSON.stringify({ operationName, query, variables }),
   });
-
-  // Set-Cookie から sessionId を拾う（初回）
-  const setCookie = res.headers.get("set-cookie");
-  const cookie =
-    setCookie?.match(/sessionId=([^;]+)/)?.[1] ?? SESSION_ID;
 
   const data = (await res.json()) as any;
   if (data.errors) {
     throw new Error(data.errors[0]?.message || "GraphQL error");
   }
-  return { ...data.data, _cookie: cookie } as T;
+  return data.data as T;
 }
 
 function wsQuery(
@@ -109,7 +107,10 @@ function wsQuery(
   model: string = "OpenAIgpt54"
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(GRAPHQL_WS, ["graphql-transport-ws"]);
+    const sessionId = getSessionId();
+    const ws = new WebSocket(GRAPHQL_WS, ["graphql-transport-ws"], {
+      headers: { Cookie: `sessionId=${sessionId}` },
+    });
     const id = crypto.randomUUID();
     let text = "";
     let timeout: NodeJS.Timeout;
@@ -199,8 +200,7 @@ ${ctx.contextLines.slice(-150).join("\n")}
 
 上記ログを参考に、日本語で簡潔・正確に答えてください。ログに無い情報は「ログには記載がない」と述べてください。`;
 
-    // 1. prepareConversation
-    const prepareRes: any = await graphqlMutation(
+    const prepareRes: any = await graphqlRequest(
       "prepareConversationBackground",
       `mutation prepareConversationBackground($chatType: ChatType!) {
         prepareConversationBackground(chatType: $chatType) { historyId }
@@ -209,8 +209,7 @@ ${ctx.contextLines.slice(-150).join("\n")}
     );
     const historyId = prepareRes.prepareConversationBackground.historyId;
 
-    // 2. issue token
-    const tokenRes: any = await graphqlMutation(
+    const tokenRes: any = await graphqlRequest(
       "IssueExecutionTokensMultiple",
       `query IssueExecutionTokensMultiple($recaptchaToken: String!, $models: [ChatModel!]!) {
         executionTokens: issueExecutionTokensMultiple(recaptchaToken: $recaptchaToken, models: $models)
@@ -219,8 +218,7 @@ ${ctx.contextLines.slice(-150).join("\n")}
     );
     const executionToken = JSON.parse(tokenRes.executionTokens)[0];
 
-    // 3. start conversation
-    await graphqlMutation(
+    await graphqlRequest(
       "startConversationBackground",
       `mutation startConversationBackground(
         $historyId: String!, $executionToken: String!, $systemPrompt: String, $prompt: String
@@ -233,7 +231,6 @@ ${ctx.contextLines.slice(-150).join("\n")}
       { historyId, executionToken, systemPrompt, prompt: question }
     );
 
-    // 4. WebSocket streaming
     const answer = await wsQuery(historyId, "OpenAIgpt54");
 
     return Response.json({ answer, historyId });
