@@ -95,7 +95,15 @@ async function graphqlRequest<T = unknown>(
     body: JSON.stringify({ operationName, query, variables }),
   });
 
-  const data = (await res.json()) as any;
+  const text = await res.text();
+  let data: any;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(
+      `GraphQL response parse error (${res.status}): ${text.substring(0, 200)}`
+    );
+  }
   if (data.errors) {
     throw new Error(data.errors[0]?.message || "GraphQL error");
   }
@@ -216,7 +224,8 @@ ${ctx.contextLines.slice(-150).join("\n")}
       }`,
       { recaptchaToken: "test", models: ["OpenAIgpt54"] }
     );
-    const executionToken = JSON.parse(tokenRes.executionTokens)[0];
+    const rawTokens = tokenRes.executionTokens;
+    const executionToken = Array.isArray(rawTokens) ? rawTokens[0] : JSON.parse(rawTokens)[0];
 
     await graphqlRequest(
       "startConversationBackground",
