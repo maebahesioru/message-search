@@ -117,7 +117,12 @@ function wsQuery(
   return new Promise((resolve, reject) => {
     const sessionId = getSessionId();
     const ws = new WebSocket(GRAPHQL_WS, ["graphql-transport-ws"], {
-      headers: { Cookie: `sessionId=${sessionId}` },
+      headers: {
+        Cookie: `sessionId=${sessionId}`,
+        Origin: "https://biz.tenbin.ai",
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      },
     });
     const id = crypto.randomUUID();
     let text = "";
