@@ -112,7 +112,7 @@ async function graphqlRequest<T = unknown>(
 
 function wsQuery(
   historyId: string,
-  model: string = "OpenAIgpt54"
+  model: string = "GeminiPro31Preview"
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const sessionId = getSessionId();
@@ -227,7 +227,7 @@ ${ctx.contextLines.slice(-150).join("\n")}
       `query IssueExecutionTokensMultiple($recaptchaToken: String!, $models: [ChatModel!]!) {
         executionTokens: issueExecutionTokensMultiple(recaptchaToken: $recaptchaToken, models: $models)
       }`,
-      { recaptchaToken: "test", models: ["OpenAIgpt54"] }
+      { recaptchaToken: "test", models: ["GeminiPro31Preview"] }
     );
     const rawTokens = tokenRes.executionTokens;
     const executionToken = Array.isArray(rawTokens) ? rawTokens[0] : JSON.parse(rawTokens)[0];
@@ -245,7 +245,7 @@ ${ctx.contextLines.slice(-150).join("\n")}
       { historyId, executionToken, systemPrompt, prompt: question }
     );
 
-    const answer = await wsQuery(historyId, "OpenAIgpt54");
+    const answer = await wsQuery(historyId, "GeminiPro31Preview");
 
     return Response.json({ answer, historyId });
   } catch (err: any) {
