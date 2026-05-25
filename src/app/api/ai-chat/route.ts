@@ -1,16 +1,9 @@
 import { NextRequest } from "next/server";
 import fs from "fs";
 import path from "path";
-import WebSocket from "ws";
 
-const GRAPHQL_HTTP = "https://biz-graphql.tenbin.ai/graphql";
-const GRAPHQL_WS = "wss://biz-graphql.tenbin.ai/graphql";
-
-function getSessionId(): string {
-  const id = process.env.TENBIN_SESSION_ID;
-  if (!id) throw new Error("TENBIN_SESSION_ID is not set in environment");
-  return id;
-}
+const OPENAI_API_BASE = process.env.OPENAI_API_BASE || "https://tenbin2api.hikamer.f5.si/v1";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "sk-dummy";
 
 let cachedMessages: Array<{
   ts: string;
@@ -79,120 +72,6 @@ function buildContext(question: string) {
   };
 }
 
-async function graphqlRequest<T = unknown>(
-  operationName: string,
-  query: string,
-  variables: Record<string, unknown>
-): Promise<T> {
-  const sessionId = getSessionId();
-  const res = await fetch(GRAPHQL_HTTP, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/graphql-response+json",
-      Cookie: `sessionId=${sessionId}`,
-    },
-    body: JSON.stringify({ operationName, query, variables }),
-  });
-
-  const text = await res.text();
-  let data: any;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(
-      `GraphQL response parse error (${res.status}): ${text.substring(0, 200)}`
-    );
-  }
-  if (data.errors) {
-    throw new Error(data.errors[0]?.message || "GraphQL error");
-  }
-  return data.data as T;
-}
-
-function wsQuery(
-  historyId: string,
-  model: string = "GeminiPro31Preview"
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const sessionId = getSessionId();
-    const ws = new WebSocket(GRAPHQL_WS, ["graphql-transport-ws"], {
-      headers: {
-        Cookie: `sessionId=${sessionId}`,
-        Origin: "https://biz.tenbin.ai",
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      },
-    });
-    const id = crypto.randomUUID();
-    let text = "";
-    let timeout: NodeJS.Timeout;
-
-    const clear = () => {
-      clearTimeout(timeout);
-      try {
-        ws.close();
-      } catch {}
-    };
-
-    timeout = setTimeout(() => {
-      clear();
-      reject(new Error("WebSocket timeout"));
-    }, 120_000);
-
-    ws.on("open", () => {
-      ws.send(JSON.stringify({ type: "connection_init" }));
-    });
-
-    ws.on("message", (raw) => {
-      const msg = JSON.parse(raw.toString());
-      if (msg.type === "connection_ack") {
-        ws.send(
-          JSON.stringify({
-            id,
-            type: "subscribe",
-            payload: {
-              operationName: "ContinueConversation",
-              query: `subscription ContinueConversation($historyId: String!, $model: String!, $isReconnecting: Boolean) {
-                continueConversation(historyId: $historyId, model: $model, isReconnecting: $isReconnecting) {
-                  seq deltaToken isFinished newStateToken error action activity id isReconnectionReplay __typename
-                }
-              }`,
-              variables: { historyId, model, isReconnecting: false },
-            },
-          })
-        );
-      }
-      if (msg.type === "next" && msg.payload?.data?.continueConversation) {
-        const d = msg.payload.data.continueConversation;
-        if (d.deltaToken) text += d.deltaToken;
-        if (d.isFinished) {
-          clear();
-          resolve(text);
-        }
-      }
-      if (msg.type === "complete") {
-        clear();
-        resolve(text);
-      }
-      if (msg.type === "error") {
-        clear();
-        reject(new Error(msg.payload?.message || "WS error"));
-      }
-    });
-
-    ws.on("error", (err) => {
-      clear();
-      reject(err);
-    });
-
-    ws.on("close", () => {
-      clear();
-      resolve(text);
-    });
-  });
-}
-
 export async function POST(req: NextRequest) {
   try {
     const { question, systemHint } = await req.json();
@@ -213,41 +92,34 @@ ${ctx.contextLines.slice(-150).join("\n")}
 
 上記ログを参考に、日本語で簡潔・正確に答えてください。ログに無い情報は「ログには記載がない」と述べてください。`;
 
-    const prepareRes: any = await graphqlRequest(
-      "prepareConversationBackground",
-      `mutation prepareConversationBackground($chatType: ChatType!) {
-        prepareConversationBackground(chatType: $chatType) { historyId }
-      }`,
-      { chatType: "CHAT" }
-    );
-    const historyId = prepareRes.prepareConversationBackground.historyId;
+    const res = await fetch(`${OPENAI_API_BASE}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "GeminiPro31Preview",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: question },
+        ],
+        stream: false,
+      }),
+    });
 
-    const tokenRes: any = await graphqlRequest(
-      "IssueExecutionTokensMultiple",
-      `query IssueExecutionTokensMultiple($recaptchaToken: String!, $models: [ChatModel!]!) {
-        executionTokens: issueExecutionTokensMultiple(recaptchaToken: $recaptchaToken, models: $models)
-      }`,
-      { recaptchaToken: "test", models: ["GeminiPro31Preview"] }
-    );
-    const rawTokens = tokenRes.executionTokens;
-    const executionToken = Array.isArray(rawTokens) ? rawTokens[0] : JSON.parse(rawTokens)[0];
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      return Response.json(
+        { error: `API error ${res.status}: ${errText.slice(0, 200)}` },
+        { status: 502 }
+      );
+    }
 
-    await graphqlRequest(
-      "startConversationBackground",
-      `mutation startConversationBackground(
-        $historyId: String!, $executionToken: String!, $systemPrompt: String, $prompt: String
-      ) {
-        startConversationBackground(
-          historyId: $historyId, executionToken: $executionToken,
-          systemPrompt: $systemPrompt, prompt: $prompt
-        ) { historyId }
-      }`,
-      { historyId, executionToken, systemPrompt, prompt: question }
-    );
+    const data = await res.json();
+    const answer = data.choices?.[0]?.message?.content || "";
 
-    const answer = await wsQuery(historyId, "GeminiPro31Preview");
-
-    return Response.json({ answer, historyId });
+    return Response.json({ answer });
   } catch (err: any) {
     console.error("AI chat error:", err);
     return Response.json(
